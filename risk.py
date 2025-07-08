@@ -87,3 +87,17 @@ class RiskCalculator:
             if len(aligned) < 2:
                 raise ValueError("Need at least two assets with price history for correlation.")
             return np.corrcoef(aligned)
+
+# in risk.py, inside RiskCalculator
+    def beta(self, prices_benchmark: list[float], prices_asset: list[float]) -> float:
+        # log returns
+        r_b = np.diff(np.log(prices_benchmark))
+        r_a = np.diff(np.log(prices_asset))
+        cov = np.cov(r_a, r_b, ddof=1)[0,1]
+        var_b = np.var(r_b, ddof=1)
+        return cov / var_b
+
+    def perp_hedge_ratio(self, spot_series: list[float], perp_series: list[float]) -> float:
+        β = self.beta(spot_series, perp_series)
+        # hedge size = spot_qty * β  (so that perp exposure offsets spot)
+        return self.spot * β

@@ -2,25 +2,41 @@ import logging
 import time
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+)
 from config import TELEGRAM_BOT_TOKEN
 from deribit_client import DeribitClient, DeribitError
 from risk import RiskCalculator
 from options_hedger import OptionsHedger
+from greeks import GreeksCalculator, OptionType
 
 logger = logging.getLogger(__name__)
 
 # initialize Deribit client
 client = DeribitClient()
-# in-memory portfolio
-portfolio = {}
+
+# in-memory portfolio with defaults
+portfolio = {
+    'asset': None,
+    'spot': None,
+    'perp': None,
+    'threshold': 10.0,  # default threshold percent
+    'freq': 60,         # default monitoring frequency in seconds
+}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Welcome! Commands:\n"
         "/monitor_risk <asset> <spot> <perp> <thr%>\n"
         "/hedge_protective_put <asset> <spot> <strike> <days> <vol>\n"
-        "/risk_report <asset> <spot> <perp> <days> <conf>"
+        "/risk_report <asset> <spot> <perp> <days> <conf>\n"
+        "/start_monitoring [freq]\n"
+        "/stop_monitoring\n"
+        "/configure threshold=<%> freq=<seconds>"
     )
 
 async def monitor_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -67,15 +83,15 @@ async def monitor_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Unexpected error in monitor_risk")
         await update.message.reply_text(f"Unexpected error: {e}")
 
-
 async def hedge_protective_put(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles /hedge_protective_put for buying protective puts."""
     try:
-        asset, spot, strike, days, vol = context.args
+        asset, spot_str, strike_str, days_str, vol_str = context.args
         asset = asset.upper()
-        spot = float(spot)
-        strike = float(strike)
-        days = int(days)
-        vol = float(vol)
+        spot = float(spot_str)
+        strike = float(strike_str)
+        days = int(days_str)
+        vol = float(vol_str)
 
         # fetch current spot proxy price
         S = client.get_spot_price(asset)
@@ -88,8 +104,15 @@ async def hedge_protective_put(update: Update, context: ContextTypes.DEFAULT_TYP
         hedger = OptionsHedger(S, strike, T, 0.0, vol, spot)
         qty = hedger.hedge_qty()
 
+        # compute Greeks
+        gamma = GreeksCalculator.gamma(S, strike, T, 0.0, vol)
+        theta = GreeksCalculator.theta(S, strike, T, 0.0, vol, OptionType.PUT)
+        vega = GreeksCalculator.vega(S, strike, T, 0.0, vol)
+
         # fetch live option price
         price = client.get_ticker(inst_name)
+        if price is None or price == 0.0:
+            price = float('nan')  # fallback if zero
 
         await update.message.reply_text(
             f"Protective Put Hedging:\n"
@@ -98,41 +121,43 @@ async def hedge_protective_put(update: Update, context: ContextTypes.DEFAULT_TYP
             f"Price per Contract: {price:.2f}\n"
             f"Put Delta per Contract: {hedger.put_delta():.4f}\n"
             f"Total Delta Hedged: {qty * hedger.put_delta():.4f}\n"
+            f"Gamma: {gamma:.4f}\n"
+            f"Theta: {theta:.6f}\n"
+            f"Vega: {vega:.4f}"
         )
     except DeribitError as e:
         await update.message.reply_text(f"Instrument lookup error: {e}")
     except Exception:
         await update.message.reply_text("Usage: /hedge_protective_put ETH 2 3000 30 0.5")
 
-        await update.message.reply_text("Usage: /hedge_protective_put ETH 2 1800 30 0.5")
-
-
 async def risk_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Generates VaR, max drawdown, and correlation matrix over historical period."""
     try:
-        asset, spot, perp, days, conf = context.args
+        asset, spot_str, perp_str, days_str, conf_str = context.args
         asset = asset.upper()
-        spot = float(spot)
-        perp = float(perp)
-        days = int(days)
-        conf = float(conf)
+        spot = float(spot_str)
+        perp = float(perp_str)
+        days = int(days_str)
+        conf = float(conf_str)
 
         end_ts = int(time.time() * 1000)
         start_ts = int((datetime.utcnow() - timedelta(days=days)).timestamp() * 1000)
 
-        # Fetch historical series
-        perp_series = client.get_historical_prices(f"{asset}-PERPETUAL", start_ts, end_ts)
+        # Fetch historical perpetual series
+        perp_series = client.get_historical_prices(
+            f"{asset}-PERPETUAL", start_ts, end_ts
+        )
         if len(perp_series) < 2:
             raise ValueError("Not enough perp data")
 
-        # (Optional) Replace this with a true spot series when available
-        spot_series = client.get_historical_prices(f"{asset}-PERPETUAL", start_ts, end_ts)
+        # Use perpetual as spot proxy
+        spot_series = perp_series.copy()
 
         rc = RiskCalculator(spot, perp)
 
         # VaR & max drawdown
         var = rc.var(perp_series, conf)
-        pnl = [(p - perp_series[0]) * spot for p in perp_series]
+        pnl = [(p - perp_series[0]) * perp for p in perp_series]
         mdd = rc.max_drawdown(pnl)
 
         # Correlation matrix
@@ -154,31 +179,167 @@ async def risk_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception:
         await update.message.reply_text("Usage: /risk_report BTC 2 -1 7 0.95")
-        
+
+async def start_monitoring(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Begin periodic risk checks."""
+    freq = portfolio.get('freq', 60)
+    # optional override: /start_monitoring 30
+    if context.args:
+        try:
+            freq = int(context.args[0])
+            portfolio['freq'] = freq
+        except:
+            pass
+    context.job_queue.run_repeating(
+        _monitor_job, interval=freq, first=0,
+        data=update.effective_chat.id
+    )
+    await update.message.reply_text(f"✅ Auto‑monitoring every {freq}s started.")
+
+async def stop_monitoring(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel all monitoring jobs."""
+    for job in context.job_queue.jobs():
+        job.schedule_removal()
+    await update.message.reply_text("🛑 Auto‑monitoring stopped.")
+
+async def configure(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Configure threshold or frequency."""
+    for kv in context.args:
+        if '=' in kv:
+            key, val = kv.split('=', 1)
+            if key == 'threshold':
+                try:
+                    portfolio['threshold'] = float(val)
+                except:
+                    pass
+            if key == 'freq':
+                try:
+                    portfolio['freq'] = int(val)
+                except:
+                    pass
+    await update.message.reply_text(f"⚙️ Updated settings: {portfolio}")
+
+async def _monitor_job(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.job.data
+    asset = portfolio.get('asset')
+    spot = portfolio.get('spot')
+    perp = portfolio.get('perp')
+    thr = portfolio.get('threshold')
+
+    if not asset or spot is None or perp is None:
+        await context.bot.send_message(
+            chat_id,
+            "⚠️ Monitoring skipped: Missing asset/spot/perp.\n"
+            "Please run /monitor_risk first to initialize the portfolio."
+        )
+        return
+
+    try:
+        # Proxy spot history with perp series
+        spot_series = client.get_historical_prices(
+            f"{asset}-PERPETUAL",
+            int((datetime.utcnow() - timedelta(days=7)).timestamp() * 1000),
+            int(time.time() * 1000)
+        )
+        perp_series = spot_series
+
+        rc = RiskCalculator(spot, perp, thr)
+        β = rc.beta(spot_series, perp_series)
+        hedge_ratio = rc.perp_hedge_ratio(spot_series, perp_series)
+
+        if rc.needs_hedge():
+            msg = (
+                f"🚨 Risk Alert: {asset}\n"
+                f"• Net Δ: {rc.net_delta():.4f} (Thr ±{rc.threshold_limit():.4f})\n"
+                f"• β: {β:.3f}\n"
+                f"*Recommended perp hedge*: {hedge_ratio:.4f}\n"
+            )
+            keyboard = [
+                [InlineKeyboardButton("Hedge Now", callback_data="hedge_now")],
+                [InlineKeyboardButton("Adjust Thr%", callback_data="adjust_threshold")],
+                [InlineKeyboardButton("View Analytics", callback_data="view_analytics")]
+            ]
+            await context.bot.send_message(chat_id, msg, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    except Exception as e:
+        await context.bot.send_message(chat_id, f"⚠️ Error during monitoring: {e}")
+        logger.exception("Monitoring job failed")
+
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles button callbacks for hedging actions."""
     query = update.callback_query
     await query.answer()
-    try:
+    if query.data == "adjust_threshold":
+        await query.edit_message_text("Send new threshold % with /configure threshold=<value>")
+    elif query.data == "view_analytics":
+        await query.edit_message_text(f"Analytics: {portfolio}")
+    else:  # "hedge_now"
         rc = RiskCalculator(
             portfolio['spot'], portfolio['perp'], portfolio['threshold']
         )
-        amount = rc.hedge_amount()
-        portfolio['perp'] -= amount  # simulate hedge
-        text = f"✅ Hedged {amount:.4f} of {portfolio['asset']}. New perp size: {portfolio['perp']:.4f}"
-        await query.edit_message_text(text)
-    except Exception as e:
-        logger.exception("Error in button_handler")
-        await query.edit_message_text(f"Error processing hedge: {e}")
+        amt = rc.hedge_amount()
+        portfolio['perp'] -= amt
+        await query.edit_message_text(f"✅ Hedged {amt:.4f}. New perp: {portfolio['perp']:.4f}")
 
-if __name__=="__main__":
+async def _monitor_job(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.job.data
+    asset = portfolio.get('asset')
+    spot = portfolio.get('spot')
+    perp = portfolio.get('perp')
+    thr = portfolio.get('threshold')
+
+    if not asset or spot is None or perp is None:
+        await context.bot.send_message(
+            chat_id,
+            "⚠️ Monitoring skipped: Missing asset/spot/perp.\n"
+            "Please run /monitor_risk first to initialize the portfolio."
+        )
+        return
+
+    try:
+        # Proxy spot history with perp series
+        spot_series = client.get_historical_prices(
+            f"{asset}-PERPETUAL",
+            int((datetime.utcnow() - timedelta(days=7)).timestamp() * 1000),
+            int(time.time() * 1000)
+        )
+        perp_series = spot_series
+
+        rc = RiskCalculator(spot, perp, thr)
+        β = rc.beta(spot_series, perp_series)
+        hedge_ratio = rc.perp_hedge_ratio(spot_series, perp_series)
+
+        if rc.needs_hedge():
+            msg = (
+                f"🚨 Risk Alert: {asset}\n"
+                f"• Net Δ: {rc.net_delta():.4f} (Thr ±{rc.threshold_limit():.4f})\n"
+                f"• β: {β:.3f}\n"
+                f"*Recommended perp hedge*: {hedge_ratio:.4f}\n"
+            )
+            keyboard = [
+                [InlineKeyboardButton("Hedge Now", callback_data="hedge_now")],
+                [InlineKeyboardButton("Adjust Thr%", callback_data="adjust_threshold")],
+                [InlineKeyboardButton("View Analytics", callback_data="view_analytics")]
+            ]
+            await context.bot.send_message(chat_id, msg, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    except Exception as e:
+        await context.bot.send_message(chat_id, f"⚠️ Error during monitoring: {e}")
+        logger.exception("Monitoring job failed")
+
+if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    job_queue = app.job_queue  # This ensures JobQueue is initialized
+
+    # register handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("monitor_risk", monitor_risk))
     app.add_handler(CommandHandler("hedge_protective_put", hedge_protective_put))
     app.add_handler(CommandHandler("risk_report", risk_report))
+    app.add_handler(CommandHandler("start_monitoring", start_monitoring))
+    app.add_handler(CommandHandler("stop_monitoring", stop_monitoring))
+    app.add_handler(CommandHandler("configure", configure))
     app.add_handler(CallbackQueryHandler(button_handler))
+
     print("Bot running...")
     app.run_polling()
-

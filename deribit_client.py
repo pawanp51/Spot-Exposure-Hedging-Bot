@@ -77,7 +77,7 @@ class DeribitClient:
         :return: instrument_name or raises DeribitError
         """
         instruments = self.get_instruments(asset)
-        target_ts = (datetime.utcnow() + timedelta(days=days)).timestamp() * 1000
+        target_ts = (datetime.now() + timedelta(days=days)).timestamp() * 1000
         # filter by type and nearest expiry
         candidates = [inst for inst in instruments
                       if inst.get("option_type") == option_type and abs(inst.get("strike") - strike) < 1e-6]
