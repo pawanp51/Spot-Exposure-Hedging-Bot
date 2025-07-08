@@ -2,7 +2,6 @@ import logging
 import requests
 from requests.adapters import HTTPAdapter, Retry
 from datetime import datetime, timedelta
-from config import DERIBIT_API_KEY, DERIBIT_API_SECRET
 
 BASE_URL = "https://www.deribit.com/api/v2/"
 logger = logging.getLogger(__name__)

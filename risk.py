@@ -88,7 +88,6 @@ class RiskCalculator:
                 raise ValueError("Need at least two assets with price history for correlation.")
             return np.corrcoef(aligned)
 
-# in risk.py, inside RiskCalculator
     def beta(self, prices_benchmark: list[float], prices_asset: list[float]) -> float:
         # log returns
         r_b = np.diff(np.log(prices_benchmark))
