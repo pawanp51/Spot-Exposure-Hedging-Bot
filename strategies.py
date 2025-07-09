@@ -3,13 +3,13 @@ from datetime import datetime
 from math import ceil
 from typing import Dict
 
-from deribit_client import DeribitClient, DeribitError
+from multi_exchange_client import MultiExchangeClient, ExchangeError
 from options_hedger import OptionsHedger
 from greeks import GreeksCalculator, OptionType
 from risk import RiskCalculator
 
-# single shared client
-client = DeribitClient()
+# single shared client across all strategies
+client = MultiExchangeClient()
 
 def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -19,9 +19,11 @@ def hedge_protective_put(asset: str,
                          strike: float,
                          days: int,
                          vol: float) -> Dict:
-    """Long-put protective hedge."""
+    """Long‐put protective hedge."""
+    # get best spot proxy
     S = client.get_spot_price(asset)
     T = days / 365
+    # Deribit options only, so use Deribit find_option_instrument
     inst = client.find_option_instrument(asset, strike, days, option_type="put")
     hedger = OptionsHedger(S, strike, T, 0.0, vol, spot_qty)
     qty = hedger.hedge_qty()
@@ -52,7 +54,7 @@ def covered_call(asset: str,
     return {
         "strategy": "covered_call",
         "instrument": inst,
-        "size": -qty,            # negative= sold
+        "size": -qty,            # negative = sold
         "cost": -qty * price,    # premium collected
         "timestamp": _now()
     }
@@ -81,10 +83,11 @@ def delta_neutral(asset: str,
                   perp_qty: float,
                   threshold: float) -> Dict:
     """Perpetual futures hedge to neutralize net delta."""
+    # now pulls perp price from best exchange
     spot_price = client.get_spot_price(asset)
     perp_price = client.get_perpetual_price(asset)
     rc = RiskCalculator(spot_qty, perp_qty, threshold)
-    hedge_qty = -rc.hedge_amount()   # trade this many perpetual
+    hedge_qty = -rc.hedge_amount()   # trade this many perpetual contracts
     return {
         "strategy": "delta_neutral",
         "size": hedge_qty,

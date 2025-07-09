@@ -84,3 +84,39 @@ class PortfolioAnalytics:
                 totals["vega"]  += side * size * v
 
         return totals
+    
+    def compute_pnl_attribution(self) -> Dict:
+        """
+        Returns a breakdown of unrealized P&L for each position
+        plus a total P&L.
+        """
+        breakdown = []
+        total_pnl = 0.0
+
+        for pos in self.positions:
+            side, size = pos["side"], pos["size"]
+            entry = pos["entry_price"]
+            inst = pos["instrument"]
+
+            if pos["type"] == "spot":
+                current = client.get_spot_price(inst.split("-")[0])
+            elif pos["type"] == "perp":
+                current = client.get_perpetual_price(inst.split("-")[0])
+            else:  # option
+                current = client.get_ticker(inst)
+
+            pnl = side * size * (current - entry)
+            breakdown.append({
+                "instrument": inst,
+                "size": size * side,
+                "entry": entry,
+                "current": current,
+                "pnl": pnl
+            })
+            total_pnl += pnl
+
+        return {
+            "total_pnl": total_pnl,
+            "legs": breakdown,
+            "timestamp": _now()
+        }
