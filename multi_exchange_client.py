@@ -5,7 +5,6 @@ import time
 from requests.adapters import HTTPAdapter, Retry
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
-from config import DERIBIT_API_KEY, DERIBIT_API_SECRET
 
 logger = logging.getLogger(__name__)
 
@@ -18,18 +17,21 @@ class MultiExchangeClient:
     Uses CCXT for OKX and Bybit, custom REST client for Deribit.
     """
     
-    def __init__(self, max_retries=3, backoff=0.3):
+    def __init__(self, max_retries=3, backoff=0.3, cooldown=30):
         # Initialize CCXT exchanges (no API keys needed for public data)
+
         self.okx = ccxt.okx({
             'sandbox': False,
             'rateLimit': 1000,
             'enableRateLimit': True,
+            'timeout': 5000,
         })
         
         self.bybit = ccxt.bybit({
             'sandbox': False,
             'rateLimit': 1000,
             'enableRateLimit': True,
+            'timeout': 5000,
         })
         
         # Initialize Deribit REST client
@@ -255,7 +257,7 @@ class MultiExchangeClient:
             if exchange == 'deribit':
                 data = self._deribit_get("public/get_order_book", {
                     "instrument_name": symbol,
-                    "depth": 20
+                    "depth": 100
                 })
                 return {
                     'bids': data.get('bids', []),
@@ -316,6 +318,100 @@ class MultiExchangeClient:
             }
         
         return summary
+    
+    def estimate_slippage(self, asset: str, order_size: float, side: str = 'buy', 
+                     exchange: str = 'deribit', instrument_type: str = 'spot') -> Dict:
+        """
+        Estimate slippage for a given order size based on orderbook depth.
+        
+        Args:
+            asset: Trading asset (e.g., 'BTC')
+            order_size: Size of the order (positive number)
+            side: 'buy' or 'sell'
+            exchange: Exchange to check orderbook
+            instrument_type: 'spot' or 'perpetual'
+        
+        Returns:
+            Dict with slippage estimate details
+        """
+        try:
+            orderbook = self.get_orderbook(asset, exchange, instrument_type)
+            
+            if not orderbook.get('bids') or not orderbook.get('asks'):
+                return {
+                    'slippage_pct': 0.5,  # Default 0.5% if no orderbook
+                    'slippage_abs': 0.0,
+                    'average_price': 0.0,
+                    'market_price': 0.0,
+                    'error': 'No orderbook data'
+                }
+            
+            # Get current market price
+            if side == 'buy':
+                market_price = float(orderbook['asks'][0][0])  # Best ask
+                orders = orderbook['asks']
+            else:
+                market_price = float(orderbook['bids'][0][0])  # Best bid
+                orders = orderbook['bids']
+            
+            # Calculate weighted average price for the order
+            remaining_size = abs(order_size)
+            total_cost = 0.0
+            total_filled = 0.0
+            
+            for price, size in orders:
+                price, size = float(price), float(size)
+                
+                if remaining_size <= 0:
+                    break
+                    
+                fill_size = min(remaining_size, size)
+                total_cost += fill_size * price
+                total_filled += fill_size
+                remaining_size -= fill_size
+            
+            if total_filled == 0:
+                return {
+                    'slippage_pct': 1.0,  # Default 1% if can't fill
+                    'slippage_abs': 0.0,
+                    'average_price': market_price,
+                    'market_price': market_price,
+                    'error': 'Insufficient liquidity'
+                }
+            
+            average_price = total_cost / total_filled
+            
+            # Calculate slippage
+            if side == 'buy':
+                slippage_abs = average_price - market_price
+            else:
+                slippage_abs = market_price - average_price
+                
+            slippage_pct = (slippage_abs / market_price) * 100
+            
+            # If we couldn't fill the entire order, add penalty
+            if remaining_size > 0:
+                unfilled_pct = remaining_size / abs(order_size)
+                slippage_pct += unfilled_pct * 0.5  # Add 0.5% per 100% unfilled
+            
+            return {
+                'slippage_pct': max(0, slippage_pct),
+                'slippage_abs': max(0, slippage_abs),
+                'average_price': average_price,
+                'market_price': market_price,
+                'filled_pct': (total_filled / abs(order_size)) * 100,
+                'error': None
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to estimate slippage: {e}")
+            return {
+                'slippage_pct': 0.5,  # Default 0.5%
+                'slippage_abs': 0.0,
+                'average_price': 0.0,
+                'market_price': 0.0,
+                'error': str(e)
+            }
 
 
 # Legacy compatibility - single exchange clients
@@ -380,7 +476,6 @@ class BybitClient(MultiExchangeClient):
         if price:
             return price
         raise ExchangeError(f"Could not get {asset} perpetual price from Bybit")
-
 
 # Backward compatibility
 DeribitError = ExchangeError

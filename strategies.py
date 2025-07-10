@@ -8,9 +8,6 @@ from options_hedger import OptionsHedger
 from greeks import GreeksCalculator, OptionType
 from risk import RiskCalculator
 
-# single shared client across all strategies
-client = MultiExchangeClient()
-
 def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -18,7 +15,8 @@ def hedge_protective_put(asset: str,
                          spot_qty: float,
                          strike: float,
                          days: int,
-                         vol: float) -> Dict:
+                         vol: float,
+                         client: MultiExchangeClient) -> Dict:
     """Long‐put protective hedge."""
     # get best spot proxy
     S = client.get_spot_price(asset)
@@ -44,7 +42,8 @@ def covered_call(asset: str,
                  spot_qty: float,
                  strike: float,
                  days: int,
-                 vol: float) -> Dict:
+                 vol: float,
+                 client: MultiExchangeClient) -> Dict:
     """Covered call: hold spot, sell a call per unit."""
     S = client.get_spot_price(asset)
     T = days / 365
@@ -64,10 +63,11 @@ def collar(asset: str,
            put_strike: float,
            call_strike: float,
            days: int,
-           vol: float) -> Dict:
+           vol: float,
+           client: MultiExchangeClient) -> Dict:
     """Collar = long put + short call in equal quantities."""
-    put = hedge_protective_put(asset, spot_qty, put_strike, days, vol)
-    call = covered_call(asset, spot_qty, call_strike, days, vol)
+    put = hedge_protective_put(asset, spot_qty, put_strike, days, vol, client)
+    call = covered_call(asset, spot_qty, call_strike, days, vol, client)
     net_cost = put["cost"] + call["cost"]
     return {
         "strategy": "collar",
@@ -81,7 +81,8 @@ def collar(asset: str,
 def delta_neutral(asset: str,
                   spot_qty: float,
                   perp_qty: float,
-                  threshold: float) -> Dict:
+                  threshold: float,
+                  client: MultiExchangeClient) -> Dict:
     """Perpetual futures hedge to neutralize net delta."""
     # now pulls perp price from best exchange
     spot_price = client.get_spot_price(asset)

@@ -1,9 +1,10 @@
 from typing import List, Dict
 from datetime import datetime
 from greeks import GreeksCalculator, OptionType
-from deribit_client import DeribitClient
+from multi_exchange_client import MultiExchangeClient
 
-client = DeribitClient()
+client = MultiExchangeClient()
+
 
 def _now() -> str:
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")

@@ -1,5 +1,6 @@
 import logging
 import time
+import numpy as np
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -19,6 +20,8 @@ from strategies import (
 )
 from portfolio_analytics import PortfolioAnalytics
 from greeks import OptionType
+from risk_viz import plot_var_histogram, plot_stress_scenarios
+
 
 # single, shared clients & state
 logger = logging.getLogger(__name__)
@@ -72,6 +75,45 @@ def _format_price_summary(asset: str, prices: dict) -> str:
     
     return "\n".join(lines)
 
+def _calculate_trade_costs(asset: str, size: float, exchange: str = 'auto') -> dict:
+    """Calculate estimated trading costs including slippage."""
+    client = _get_client_for_exchange(exchange)
+    
+    # Determine trade side and instrument type
+    side = 'buy' if size > 0 else 'sell'
+    instrument_type = 'perpetual'  # Most hedges use perpetuals
+    
+    # Get slippage estimate
+    slippage = client.estimate_slippage(asset, abs(size), side, exchange, instrument_type)
+    
+    # Get current price
+    try:
+        current_price = client.get_perpetual_price(asset)
+    except:
+        current_price = slippage.get('market_price', 0)
+    
+    # Calculate total costs
+    notional = abs(size) * current_price
+    slippage_cost = notional * (slippage['slippage_pct'] / 100)
+    
+    # Estimate trading fees (typical range)
+    fee_rate = 0.0005  # 0.05% typical maker fee
+    trading_fees = notional * fee_rate
+    
+    total_cost = slippage_cost + trading_fees
+    
+    return {
+        'notional': notional,
+        'slippage_pct': slippage['slippage_pct'],
+        'slippage_cost': slippage_cost,
+        'trading_fees': trading_fees,
+        'total_cost': total_cost,
+        'average_price': slippage.get('average_price', current_price),
+        'market_price': current_price,
+        'filled_pct': slippage.get('filled_pct', 100),
+        'error': slippage.get('error')
+    }
+
 # --- /start & /help ---
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -96,6 +138,22 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "**Supported Exchanges:** Deribit, OKX, Bybit\n"
         "/help — same as /start"
     )
+
+async def show_return_dist(update, ctx):
+    series = main_client.get_historical_prices(portfolio['asset'], days=7)
+    returns = np.diff(np.log(series))
+    if len(returns) < 2:
+        return await update.message.reply_text("Not enough data for return distribution.")
+    img = plot_var_histogram(returns)
+    await update.message.reply_photo(photo=img)
+
+async def stress_test(update, ctx):
+    series = main_client.get_historical_prices(portfolio['asset'], days=7)
+    if len(series) < 2:
+        return await update.message.reply_text("Not enough data for stress test.")
+    img = plot_stress_scenarios(series, shocks=[-0.1, +0.1])
+    await update.message.reply_photo(photo=img)
+
 
 async def monitor_risk(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     args = ctx.args or []
@@ -138,6 +196,7 @@ async def monitor_risk(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     rc = RiskCalculator(spot_val, perp_val, threshold)
     net_val = rc.net_delta()
     lim_val = rc.threshold_limit()
+    costs = _calculate_trade_costs(asset, perp_qty, exchange)
 
     msg = (
         f"**{asset} Risk Monitor**\n"
@@ -147,8 +206,15 @@ async def monitor_risk(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"Perp: {perp_qty:.4f} @ ${pp_price:.2f} → ${perp_val:,.2f}\n\n"
         f"**Risk Metrics:**\n"
         f"Net Δ: ${net_val:,.2f}\n"
-        f"Threshold: ±${lim_val:,.2f}\n"
+        f"Threshold: ±${lim_val:,.2f}\n\n"
+        f"**Est. Trading Costs:**\n"
+        f"Slippage: {costs['slippage_pct']:.3f}% (${costs['slippage_cost']:.2f})\n"
+        f"Fees: ${costs['trading_fees']:.2f}\n"
+        f"Total: ${costs['total_cost']:.2f}\n"
     )
+
+    if costs['error']:
+        msg += f"⚠️ Cost estimate: {costs['error']}\n"
     
     buttons = []
     if rc.needs_hedge():
@@ -341,7 +407,11 @@ async def risk_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"📊 Risk Report for {asset} over {days}d @ {conf*100:.1f}%\n"
         f"• VaR: ${var:.2f}\n"
         f"• Max Drawdown: ${mdd:.2f}\n"
-        f"• Corr (spot vs perp): {corr[0,1]:.3f}"
+        f"• Corr (spot vs perp): {corr[0,1]:.3f}\n"
+    )
+    await update.message.reply_text(
+        "📈 View distribution: /return_dist\n"
+        "⚡ Run stress test: /stress_test"
     )
 
 
@@ -364,7 +434,7 @@ async def auto_hedge(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             _, asset, s_str, p_str = ctx.args
             asset = asset.upper()
             spot_qty, perp_qty = float(s_str), float(p_str)
-            res = delta_neutral(asset, spot_qty, perp_qty, portfolio['threshold'])
+            res = delta_neutral(asset, spot_qty, perp_qty, portfolio['threshold'], client)
 
             analytics.add_perp(asset=asset, size=res["size"], entry_price=client.get_perpetual_price(asset))
 
@@ -375,7 +445,7 @@ async def auto_hedge(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             days, vol = int(d_str), float(v_str)
 
             analytics.add_spot(asset=asset, size=spot_qty, entry_price=client.get_spot_price(asset))
-            res = hedge_protective_put(asset, spot_qty, strike, days, vol)
+            res = hedge_protective_put(asset, spot_qty, strike, days, vol, client)
             analytics.add_option(
                 asset=asset, option_type=OptionType.PUT, strike=strike, days=days,
                 volatility=vol, size=res["size"], entry_price=client.get_ticker(res["instrument"])
@@ -388,7 +458,7 @@ async def auto_hedge(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             days, vol = int(d_str), float(v_str)
 
             analytics.add_spot(asset=asset, size=spot_qty, entry_price=client.get_spot_price(asset))
-            res = covered_call(asset, spot_qty, strike, days, vol)
+            res = covered_call(asset, spot_qty, strike, days, vol, client)
             analytics.add_option(
                 asset=asset, option_type=OptionType.CALL, strike=strike, days=days,
                 volatility=vol, size=res["size"], entry_price=client.get_ticker(res["instrument"])
@@ -402,7 +472,7 @@ async def auto_hedge(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             days, vol = int(d_str), float(v_str)
 
             analytics.add_spot(asset=asset, size=spot_qty, entry_price=client.get_spot_price(asset))
-            res = collar(asset, spot_qty, put_strike, call_strike, days, vol)
+            res = collar(asset, spot_qty, put_strike, call_strike, days, vol, client)
 
             analytics.add_option(
                 asset=asset, option_type=OptionType.PUT, strike=put_strike, days=days,
@@ -420,10 +490,12 @@ async def auto_hedge(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text(f"Param error: {e}")
 
     hedge_log.setdefault(asset, []).append(res)
+    costs = _calculate_trade_costs(asset, res['size'], exchange)
 
     msg = (
         f"✅ {res['strategy']} on {asset}\n"
-        f"Size: {res['size']:.4f}   Cost: {res.get('cost',0):.2f}\n"
+        f"Size: {res['size']:.4f}\n"
+        f"Est. Cost: ${costs['total_cost']:.2f} (slippage: {costs['slippage_pct']:.3f}%)\n"
         f"At: {res['timestamp']}"
     )
     for g in ("delta","gamma","theta","vega"):
@@ -598,6 +670,8 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("market_summary", market_summary))
     app.add_handler(CommandHandler("set_exchange", set_exchange))
     app.add_handler(CommandHandler("exchange_status", exchange_status))
+    app.add_handler(CommandHandler("return_dist", show_return_dist))
+    app.add_handler(CommandHandler("stress_test", stress_test))
 
     app.add_handler(CallbackQueryHandler(button_handler))
 

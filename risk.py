@@ -64,7 +64,7 @@ class RiskCalculator:
         z = norm.ppf(alpha)
         # parametric VaR: -(mu + sigma * z)
         var_pct = -(mu + sigma * z)
-        return var_pct * abs(self.spot)
+        return max(var_pct * abs(self.spot), 0.0)
 
     def max_drawdown(self, pnl_series: list[float]) -> float:
         """
