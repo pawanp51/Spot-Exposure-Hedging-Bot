@@ -123,6 +123,8 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/monitor_risk <asset> <spot> <perp> <thr%> — monitor risk\n"
         "/auto_hedge — choose & run hedge strategy\n"
         "/risk_report <asset> <spot> <perp> <days> <conf> — risk analysis\n"
+        "/return_dist — view return distribution graph\n"
+        "/stress_test — run stress test on asset graph\n"
         "/start_monitoring — auto monitor every 60s\n"
         "/stop_monitoring — stop monitoring\n"
         "/configure threshold=<%> freq=<sec> exchange=<name>\n"
