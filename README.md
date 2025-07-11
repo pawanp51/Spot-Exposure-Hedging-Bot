@@ -134,7 +134,7 @@ Risk metrics and portfolio analysis for futures hedging with parametric and empi
 
 ```python
 # Delta calculations
-net_delta = spot - abs(perp)
+net_delta = spot + perp
 threshold = abs(spot) * (threshold_percent / 100)
 
 # VaR calculation
