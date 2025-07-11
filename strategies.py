@@ -85,7 +85,6 @@ def delta_neutral(asset: str,
                   client: MultiExchangeClient) -> Dict:
     """Perpetual futures hedge to neutralize net delta."""
     # now pulls perp price from best exchange
-    spot_price = client.get_spot_price(asset)
     perp_price = client.get_perpetual_price(asset)
     rc = RiskCalculator(spot_qty, perp_qty, threshold)
     hedge_qty = -rc.hedge_amount()   # trade this many perpetual contracts

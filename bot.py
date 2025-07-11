@@ -85,6 +85,16 @@ def _calculate_trade_costs(asset: str, size: float, exchange: str = 'auto') -> d
     
     # Get slippage estimate
     slippage = client.estimate_slippage(asset, abs(size), side, exchange, instrument_type)
+    if not isinstance(slippage, dict):
+        logger.warning("estimate_slippage returned None; using safe defaults")
+        slippage = {
+            'slippage_pct':   0.0,
+            'slippage_abs':   0.0,
+            'average_price':  None,
+            'market_price':   None,
+            'filled_pct':     100,
+            'error':          'estimate_slippage returned None'
+        }
     
     # Get current price
     try:
