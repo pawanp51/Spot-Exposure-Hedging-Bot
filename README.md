@@ -86,7 +86,7 @@ Risk metrics and portfolio analysis for futures hedging with parametric and empi
 ## Core Methods
 
 ### `net_delta()`
-- **Formula**: `spot_size - abs(perp_size)`
+- **Formula**: `spot_size + perp_size`
 - **Purpose**: Calculate net delta exposure
 
 ### `threshold_limit()`
