@@ -514,7 +514,11 @@ async def hedge_now(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Usage: /hedge_now <asset> <size>")
 
     client = _get_client_for_exchange(portfolio['preferred_exchange'])
-    res = delta_neutral(asset, size, portfolio.get('perp', 0.0), portfolio['threshold'])
+    # ensure perp_qty is a float (default to 0.0 if never set)
+    perp_qty = portfolio.get('perp')
+    if perp_qty is None:
+        perp_qty = 0.0
+    res = delta_neutral(asset, size, perp_qty, portfolio['threshold'], client)
     analytics.add_perp(asset=asset, size=res["size"], entry_price=client.get_perpetual_price(asset))
     hedge_log.setdefault(asset, []).append(res)
 
@@ -633,7 +637,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if q.data == "hedge_now":
         # same as manual /hedge_now but inline
-        res = delta_neutral(asset, portfolio['spot'], portfolio['perp'], portfolio['threshold'])
+        res = delta_neutral(asset, portfolio['spot'], portfolio['perp'], portfolio['threshold'], client)
         portfolio['perp'] += res['size']
         hedge_log.setdefault(asset, []).append(res)
         analytics.add_perp(
@@ -647,9 +651,43 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif q.data == "adjust_threshold":
         await q.edit_message_text("Send `/configure threshold=<value>`")
-
     elif q.data.startswith("view_analytics"):
         await q.edit_message_text(f"Analytics: {portfolio}")
+    elif q.data.startswith("exchange_prices_"):
+        # inline “exchange prices” logic so it works in a callback
+        _, tgt_asset = q.data.split("exchange_prices_", 1)
+        asset = tgt_asset.upper()
+
+        # fetch across all exchanges
+        spot_prices = main_client.get_all_exchange_prices(asset, "spot")
+        perp_prices = main_client.get_all_exchange_prices(asset, "perpetual")
+
+        # build the message
+        msg = f"💱 **{asset} Exchange Prices**\n\n"
+        if spot_prices:
+            msg += "**Spot:**\n" + _format_price_summary(asset, spot_prices)
+            if len(spot_prices) > 1:
+                prices = list(spot_prices.values())
+                spread = max(prices) - min(prices)
+                pct    = spread/min(prices)*100
+                msg += f"\n📈 Spread: ${spread:.2f} ({pct:.2f}%)"
+
+        if perp_prices:
+            msg += "\n\n**Perpetual:**\n" + _format_price_summary(asset, perp_prices)
+            if len(perp_prices) > 1:
+                prices = list(perp_prices.values())
+                spread = max(prices) - min(prices)
+                pct    = spread/min(prices)*100
+                msg += f"\n📈 Spread: ${spread:.2f} ({pct:.2f}%)"
+
+        if not spot_prices and not perp_prices:
+            msg += "❌ No data available."
+
+        # edit the original message
+        await q.edit_message_text(msg, parse_mode="Markdown")
+        return
+    
+    
 
 # --- Main ---
 if __name__ == "__main__":

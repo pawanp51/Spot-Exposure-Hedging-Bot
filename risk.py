@@ -21,7 +21,7 @@ class RiskCalculator:
         self.threshold_percent = threshold
 
     def net_delta(self) -> float:
-        return self.spot + self.perp    # Perpetual futures delta = position size
+        return self.spot + self.perp
 
     def threshold_limit(self) -> float:
         """Allowed delta exposure based on threshold percent of spot."""
