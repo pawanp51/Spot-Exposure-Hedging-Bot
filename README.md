@@ -25,99 +25,127 @@ A Telegram-integrated multi-exchange crypto hedging bot that performs real-time 
 
 ---
 
-## 📈 Hedging Strategies & Math Foundations
+# Hedging Strategies & Math Foundations
 
-### ✅ Delta Neutral (Perpetual Hedge)
+## Overview
 
-* Objective: Make Net Delta ≈ 0.
-* Formula: $\text{Perp Size} = -\frac{\Delta_{spot}}{\Delta_{perp}}$
+Four core hedging strategies for options and derivatives trading with automated risk management.
 
-### ⛔ Protective Put
+## Strategies
 
-* Long spot + Long put (option).
-* Limits downside risk below strike price.
+### `hedge_protective_put(asset, spot_qty, strike, days, vol, client)`
+- **Purpose**: Downside protection for long positions
+- **Math**: Delta hedging with put options
+- **Returns**: Greeks (delta, gamma, theta, vega) + cost analysis
 
-### 📉 Covered Call
+### `covered_call(asset, spot_qty, strike, days, vol, client)`
+- **Purpose**: Income generation from long positions
+- **Math**: 1:1 hedge ratio, premium collection
+- **Returns**: Negative size (short position), negative cost (premium received)
 
-* Long spot + Short call option.
-* Generates premium income, capped upside.
+### `collar(asset, spot_qty, put_strike, call_strike, days, vol, client)`
+- **Purpose**: Risk-defined position with limited upside/downside
+- **Math**: Combined put + call strategy
+- **Returns**: Net cost, detailed breakdown of both legs
 
-### 🏛 Collar
+### `delta_neutral(asset, spot_qty, perp_qty, threshold, client)`
+- **Purpose**: Eliminate directional risk
+- **Math**: Target net delta = 0 using perpetual futures
+- **Returns**: Required futures position size
 
-* Long spot + Long put + Short call.
-* Low-cost downside hedge with capped upside.
+## Return Format
 
-Each strategy returns trade execution info + Greeks (Delta, Gamma, Theta, Vega).
+All strategies return:
+```python
+{
+    "strategy": str,      # Strategy name
+    "instrument": str,    # Option/futures instrument
+    "size": float,        # Position size (+ = long, - = short)
+    "cost": float,        # Total cost (+ = paid, - = received)
+    "timestamp": str      # Execution timestamp
+}
+```
+
+Options strategies include additional Greeks: `delta`, `gamma`, `theta`, `vega`
+
+## Key Math
+
+- **Time to expiration**: `T = days / 365`
+- **Hedge ratios**: Calculated via `OptionsHedger` class
+- **Greeks**: Real-time sensitivity analysis
+- **Delta neutral**: `hedge_qty = -risk_calculator.hedge_amount()`
 
 ---
 
-## 📊 Risk Calculation Formulas
----
+# Risk Calculation Formulas
 
-### ✳ Net Delta Exposure
-```math
-\text{Net Delta} = \text{Spot Size} - |\text{Perp Size}|
+## Overview
+
+Risk metrics and portfolio analysis for futures hedging with parametric and empirical calculations.
+
+## Core Methods
+
+### `net_delta()`
+- **Formula**: `spot_size - abs(perp_size)`
+- **Purpose**: Calculate net delta exposure
+
+### `threshold_limit()`
+- **Formula**: `abs(spot_size) * (threshold_percent / 100)`
+- **Purpose**: Maximum allowed delta exposure
+
+### `needs_hedge()`
+- **Formula**: `abs(net_delta()) > threshold_limit()`
+- **Purpose**: Boolean trigger for hedging
+
+### `hedge_amount()`
+- **Formula**: `net_delta()`
+- **Purpose**: Amount needed to neutralize delta
+
+## Risk Metrics
+
+### `var(prices, confidence=0.95)`
+**Parametric Value at Risk**
+- **Returns**: `μ + σ * z` where `z = norm.ppf(1-confidence)`
+- **Log returns**: `np.diff(np.log(prices))`
+- **Fallback**: Empirical percentile if σ < 1e-8
+
+### `max_drawdown(pnl_series)`
+**Maximum Drawdown**
+- **Formula**: `max(cumulative_max - current_value)`
+- **Returns**: Peak-to-trough decline as positive number
+
+### `correlation_matrix(price_dict)`
+**Asset Correlation**
+- **Input**: `{symbol: price_series}`
+- **Formula**: `np.corrcoef(log_returns)`
+- **Returns**: Correlation matrix
+
+### `beta(prices_benchmark, prices_asset)`
+**Beta Coefficient**
+- **Formula**: `cov(asset, benchmark) / var(benchmark)`
+- **Returns**: Asset sensitivity to benchmark
+
+### `perp_hedge_ratio(spot_series, perp_series)`
+**Optimal Hedge Ratio**
+- **Formula**: `spot_qty * β`
+- **Purpose**: Perpetual futures hedge sizing
+
+## Key Formulas
+
+```python
+# Delta calculations
+net_delta = spot - abs(perp)
+threshold = abs(spot) * (threshold_percent / 100)
+
+# VaR calculation
+returns = np.diff(np.log(prices))
+z_score = norm.ppf(1 - confidence)
+var = -(μ + σ * z_score) * position_size
+
+# Beta calculation
+β = cov(asset, benchmark) / var(benchmark)
+hedge_ratio = spot_qty * β
 ```
-Represents the directional exposure. Positive net delta indicates under-hedged, negative indicates over-hedged.
-
-### ✳ Threshold Limit
-```math
-\text{Threshold Limit} = |\text{Spot Size}| \times \left(\frac{\text{Threshold Percent}}{100}\right)
-```
-Defines the tolerance band beyond which re-hedging is triggered.
-
-### ✳ Hedge Requirement Trigger
-```math
-\text{Needs Hedge} \iff |\text{Net Delta}| > \text{Threshold Limit}
-```
-Boolean condition that determines whether rebalancing action is necessary.
-
-### ✳ Hedge Amount (Delta Neutral)
-```math
-\text{Hedge Amount} = \text{Net Delta}
-```
-Quantity of futures needed to neutralize net delta.
-
-### ✳ Parametric Value-at-Risk (VaR)
-```math
-\text{Returns} = \log(\text{Price}_{t}) - \log(\text{Price}_{t-1})
-
-\mu = \text{Mean}(\text{Returns})
-\sigma = \text{StdDev}(\text{Returns})
-\alpha = 1 - \text{Confidence Level}\\
-Z_{\alpha} = \text{norm.ppf}(\alpha)
-
-\text{VaR%} = - (\mu + \sigma \times Z_{\alpha})
-\text{VaR (USD)} = \text{VaR%} \times |\text{Spot Size}|
-```
-Falls back to empirical percentile if volatility is negligible.
-
-### ✳ Maximum Drawdown
-```math
-\text{Cumulative Max} = \max_{i \leq t}(\text{PnL}_i)
-\text{Drawdown}_t = \text{Cumulative Max}_t - \text{PnL}_t
-\text{Max Drawdown} = \max_t(\text{Drawdown}_t)
-```
-Captures the worst peak-to-trough decline in portfolio value.
-
-### ✳ Correlation Matrix
-```math
-\text{Returns}_i = \log(\text{Price}_{i,t}) - \log(\text{Price}_{i,t-1})
-\text{Correlation Matrix} = \text{corrcoef}(\text{Returns}_1, \text{Returns}_2, \ldots)
-```
-Determines asset-to-asset relationships based on return comovements.
-
-### ✳ Beta (Market Sensitivity)
-```math
-\beta = \frac{\text{Cov}(r_\text{asset}, r_\text{benchmark})}{\text{Var}(r_\text{benchmark})}
-```
-Measures the sensitivity of asset returns relative to a benchmark index.
-
-### ✳ Perpetual Futures Hedge Ratio
-```math
-\text{Hedge Size} = \text{Spot Size} \times \beta
-```
-Used to scale hedge positions dynamically based on beta-adjusted correlation.
 
 ---
 
@@ -163,8 +191,6 @@ cd hedging-bot
 
 ```env
 TELEGRAM_BOT_TOKEN=your_telegram_token
-DERIBIT_API_KEY=your_key
-DERIBIT_API_SECRET=your_secret
 ```
 
 ### 3. Install Requirements
